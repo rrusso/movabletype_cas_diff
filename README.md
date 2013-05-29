@@ -14,9 +14,11 @@ Please run:
 
 patch -p1 -u --verbose -i CAS.patch 
 
+====================
+
 Please add the following to your mt.config file:
 
-#======== AUTH ===========
+======== AUTH ===========
 
 AuthenticationModule CAS
 
