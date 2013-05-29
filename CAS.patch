@@ -1,0 +1,603 @@
+diff -Nur MT-5.2.3/addons/Community.pack/templates/global/login_form_module.mtml mt_modified/addons/Community.pack/templates/global/login_form_module.mtml
+--- MT-5.2.3/addons/Community.pack/templates/global/login_form_module.mtml	2013-01-18 00:42:10.000000000 -0600
++++ mt_modified/addons/Community.pack/templates/global/login_form_module.mtml	2013-05-29 15:30:52.807056031 -0500
+@@ -43,7 +43,7 @@
+             <$mt:Include module="<__trans phrase="Form Field">" id="password" class="" label="Password"$>
+             <input type="submit" class="sb" value="Login" />
+         </form>
+-        <a href="<$mt:CGIPath$><$mt:CommunityScript$>?__mode=login&amp;blog_id=<$mt:BlogID$>&amp;return_url=<$mt:BlogURL$>"><__trans phrase="Sign in"></a><br/>
++        <a href="<$mt:CGIPath$><$mt:CommunityScript$>?__cas_mode=login&amp;blog_id=<$mt:BlogID$>&amp;return_url=<$mt:BlogURL$>"><__trans phrase="Sign in"></a><br/>
+         <a href="<$mt:CGIPath$><$mt:CommunityScript$>?__mode=recover&amp;blog_id=<$mt:BlogID$>&amp;return_url=<$mt:BlogURL$>"><__trans phrase="Forgot Password"></a><br/>
+         <a href="<$mt:CGIPath$><$mt:CommunityScript$>?__mode=register&amp;blog_id=<$mt:BlogID$>&amp;return_url=<$mt:BlogURL$>"><__trans phrase="Sign up"></a>
+     </mt:IfLoggedIn>
+diff -Nur MT-5.2.3/lib/MT/App.pm mt_modified/lib/MT/App.pm
+--- MT-5.2.3/lib/MT/App.pm	2013-01-18 00:43:26.000000000 -0600
++++ mt_modified/lib/MT/App.pm	2013-05-29 15:30:53.359056016 -0500
+@@ -1117,7 +1117,7 @@
+     require MT::Blog;
+     require MT::Util;
+     my $new_blog;
+-    my $blog_name = $user->nickname || MT->translate("First Weblog");
++    my $blog_name = $user->name || MT->translate("First Weblog");
+ 
+     my $theme_id = MT->config('NewUserBlogTheme');
+     my $blog_id  = MT->config('NewUserTemplateBlogId');
+@@ -1167,7 +1167,7 @@
+             = MT::Blog->create_default_blog( $blog_name, undef, $website_id );
+     }
+ 
+-    my $path = $user->basename;
++    my $path = $user->name;
+     $new_blog->site_path($path);
+ 
+     my $url         = $website->site_url;
+diff -Nur MT-5.2.3/plugins/MT_CAS/config.yaml mt_modified/plugins/MT_CAS/config.yaml
+--- MT-5.2.3/plugins/MT_CAS/config.yaml	1969-12-31 18:00:00.000000000 -0600
++++ mt_modified/plugins/MT_CAS/config.yaml	2013-05-29 15:30:53.919056010 -0500
+@@ -0,0 +1,21 @@
++id: mt_cas
++name: MT_CAS
++version: 1.2
++
++config_settings:
++    MT_CAS_ValidationURL:
++
++#tags:
++#    function:
++#        SignInLink: $mt_cas::MT_CAS::Tags::_hdlr_sign_in_link
++
++applications:
++    comments:
++        methods:
++            cas_login: $mt_cas::MT_CAS::App::Comments::cas_login
++            cas_do_login: $mt_cas::MT_CAS::App::Comments::cas_do_login
++    community:
++        methods:
++            cas_login: $mt_cas::MT_CAS::App::Comments::cas_login
++            cas_do_login: $mt_cas::MT_CAS::App::Comments::cas_do_login
++            logout: $mt_cas::MT_CAS::App::Comments::cas_logout
+diff -Nur MT-5.2.3/plugins/MT_CAS/lib/MT/Auth/CAS.pm mt_modified/plugins/MT_CAS/lib/MT/Auth/CAS.pm
+--- MT-5.2.3/plugins/MT_CAS/lib/MT/Auth/CAS.pm	1969-12-31 18:00:00.000000000 -0600
++++ mt_modified/plugins/MT_CAS/lib/MT/Auth/CAS.pm	2013-05-29 15:30:53.963056008 -0500
+@@ -0,0 +1,200 @@
++############################################################################
++# Copyright © 2008-2010 Six Apart Ltd.
++# This program is free software: you can redistribute it and/or modify it
++# under the terms of version 2 of the GNU General Public License as published
++# by the Free Software Foundation, or (at your option) any later version.
++# This program is distributed in the hope that it will be useful, but WITHOUT
++# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++# FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License
++# version 2 for more details. You should have received a copy of the GNU
++# General Public License version 2 along with this program. If not, see
++# <http://www.gnu.org/licenses/>.
++package MT::Auth::CAS;
++
++use strict;
++use warnings;
++use base qw( MT::Auth::MT );
++use MT_CAS::Util;
++
++sub SURL_COOKIE_NAME { 'SourceURL' }
++sub can_recover_password { 0 }
++sub is_profile_needed { 1 }
++sub password_exists { 0 }
++sub can_logout { 1 }
++
++sub delegate_auth {
++    my $class = shift;
++    my $app = MT->instance;
++    return 1 if 'logout' eq $app->mode;
++    return 0;
++}
++
++sub sanity_check {
++    my $class = shift;
++    my ($app) = @_;
++    # $class->SUPER::sanity_check(@_);
++    return 0;
++}
++
++sub fetch_credentials {
++    my $class = shift;
++    my ( $ctx ) = @_;
++    my $app = $ctx->{app} || MT->instance();
++    my $service_url = $ctx->{service_url} || _service_url( $app );
++
++    $ctx = $class->session_credentials(@_);
++    if (!defined $ctx) {
++        # FIXME: session_js should not be the only mode
++        return undef if 'session_js' eq $app->mode;
++        if ( my $st = $app->param('ticket') ) {
++            $ctx = { app => $app, session_ticket => $st, service_url => $service_url };
++        }
++        else {
++            my $login_url = MT_CAS::Util->get_server_login_url(
++                $app->config->AuthLoginURL,
++                $service_url
++            );
++            $app->bake_cookie(
++                -name  => SURL_COOKIE_NAME(),
++                -value => $service_url,
++                -path  => '/',
++            );
++            $app->redirect($login_url);
++            return undef;
++        }
++    }
++    $ctx;
++}
++
++sub validate_credentials {
++    my $class = shift;
++    my ( $ctx, %opt ) = @_;
++
++    my $app = $ctx->{app};
++    my $st  = delete $ctx->{session_ticket};
++    my $session_id = $ctx->{session_id};
++    my $service_url = $ctx->{service_url} || _service_url( $app );
++    unless ( $st || $session_id ) {
++        my $q = $app->param;
++        $st = $q->param('ticket');
++        return MT::Auth::REDIRECT_NEEDED() unless $st;
++    }
++
++    if ( $st ) {
++        my $service_url = _service_url( $app );
++        my $validation_url = $app->config->MT_CAS_ValidationURL;
++        $validation_url ||= $app->config->AuthLoginURL;
++        my $user = MT_CAS::Util->validate_st(
++            $validation_url,
++            $service_url,
++            $st
++        );
++        unless ( $user ) {
++            my $login_url = MT_CAS::Util->get_server_login_url(
++                $app->config->AuthLoginURL,
++                $service_url
++            );
++            $app->bake_cookie(
++                -name  => SURL_COOKIE_NAME(),
++                -value => $service_url,
++                -path  => '/',
++            );
++            $app->redirect($login_url);
++            return MT::Auth::REDIRECT_NEEDED();
++        }
++        $ctx->{username} = $user;
++    }
++
++    my $result = MT::Auth::UNKNOWN();
++
++    # load author from db
++    my $author_class = $app->model('author');
++    my $author = $author_class->load({ name => $ctx->{username}, type => $author_class->AUTHOR(), auth_type => [ 'MT', $app->config->AuthenticationModule ] });
++
++    if ($author) {
++        # author status validation
++        if ($author->is_active) {
++            $result = MT::Auth::SUCCESS();
++            $app->user($author);
++
++            $result = MT::Auth::NEW_LOGIN()
++                unless $app->session_user($author, $ctx->{session_id}, %opt);
++        } else {
++            $result = MT::Auth::INACTIVE();
++        }
++    } else {
++        if ($app->config->ExternalUserManagement) {
++            $result = MT::Auth::NEW_USER();
++        }
++    }
++
++    return $result;
++}
++
++sub invalidate_credentials {
++    my $class = shift;
++    my ( $ctx ) = @_;
++    my $app = $ctx->{app} || MT->instance();
++    my $result = $class->SUPER::invalidate_credentials(@_);
++
++    # FIXME: handle_sign_in should not be the only mode
++    return $result if ( 'handle_sign_in' eq $app->mode ) && $app->param('logout');
++
++    # my $service_url = $ctx->{service_url} || _service_url( $app );
++    # my $logout_url = MT_CAS::Util->get_server_logout_url(
++    #     $app->config->AuthLoginURL,
++    #     $service_url
++    # );
++    # $app->bake_cookie(
++    #     -name  => SURL_COOKIE_NAME(),
++    #     -value => $service_url,
++    #     -path  => '/',
++    # );
++    #
++    #     my $ua = MT->new_ua( { timeout => 10 } );
++    #     return $app->redirect($logout_url) unless $ua;
++    #
++    #     my $req = new HTTP::Request( GET => $logout_url );
++    #     my $resp = $ua->request($req);
++    #     my $result = $resp->is_success ? $resp->content : $resp->status_line;
++    #
++    # use MT::Log;
++    # my $log = MT::Log->new;
++    # $log->message("Logout $logout_url (".$resp->is_success." ? ".$resp->content." : ".$resp->status_line.")");
++    # $log->save;
++
++    return undef;
++}
++
++sub new_user {
++    my $class = shift;
++    my ( $app, $user ) = @_;
++    $user->password('(none)');
++    my $tag_delim = $app->config->DefaultUserTagDelimiter;
++    $user->entry_prefs('tag_delim' => $tag_delim);
++    my $result = $user->save;
++    if ($result) {
++        $user->add_default_roles;
++    }
++    $result;
++}
++
++sub login_form {
++    my $class = shift;
++    my ( $app ) = @_;
++    return q();
++}
++
++sub _service_url {
++    my ( $app ) = @_;
++    my %args = $app->param_hash;
++    delete $args{__mode};
++    delete $args{ticket};
++    my %params = 'logout' eq $app->mode
++      ? ()
++      : ( mode => $app->mode, %args ? ( args => \%args ) : () );
++    return $app->base . $app->uri( %params );
++}
++
++1;
++__END__
+diff -Nur MT-5.2.3/plugins/MT_CAS/lib/MT_CAS/App/Comments.pm mt_modified/plugins/MT_CAS/lib/MT_CAS/App/Comments.pm
+--- MT-5.2.3/plugins/MT_CAS/lib/MT_CAS/App/Comments.pm	1969-12-31 18:00:00.000000000 -0600
++++ mt_modified/plugins/MT_CAS/lib/MT_CAS/App/Comments.pm	2013-05-29 15:30:53.975056007 -0500
+@@ -0,0 +1,147 @@
++############################################################################
++# Copyright © 2008-2010 Six Apart Ltd.
++# This program is free software: you can redistribute it and/or modify it
++# under the terms of version 2 of the GNU General Public License as published
++# by the Free Software Foundation, or (at your option) any later version.
++# This program is distributed in the hope that it will be useful, but WITHOUT
++# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++# FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License
++# version 2 for more details. You should have received a copy of the GNU
++# General Public License version 2 along with this program. If not, see
++# <http://www.gnu.org/licenses/>.
++package MT_CAS::App::Comments;
++
++use strict;
++use warnings;
++
++use MT::Util qw( remove_html is_valid_email is_url );
++use MT_CAS::Util;
++
++sub cas_login {
++    my $app = shift;
++    my $q   = $app->param;
++
++    my $login_url = MT_CAS::Util->get_server_login_url(
++        $app->config->AuthLoginURL, _service_url($app)
++    );
++    return $app->redirect($login_url);
++}
++
++sub cas_do_login {
++    my $app = shift;
++    my $q   = $app->param;
++
++    require MT::Auth;
++
++    my $ctx = MT::Auth->fetch_credentials( { app => $app, service_url => _service_url($app) } );
++    my $blog_id = $q->param('blog_id');
++    my $result = MT::Auth->validate_credentials($ctx);
++
++    my ( $message, $error );
++    my $username = $ctx->{username};
++    if (   ( MT::Auth::NEW_LOGIN() == $result )
++        || ( MT::Auth::NEW_USER() == $result )
++        || ( MT::Auth::SUCCESS() == $result ) )
++    {
++        my $commenter = $app->user;
++        if ( $q->param('external_auth') && !$commenter ) {
++
++            $app->param( 'name', $username );
++            $app->param( 'nickname', $username );
++            $app->param( 'username', $username );
++            $app->param( 'email', $username ) if (is_valid_email($username));
++
++            if ( MT::Auth::NEW_USER() == $result ) {
++                $commenter = $app->_create_commenter_assign_role( $blog_id );
++                # die $commenter;
++                return _redirect_to_target( $app ) unless $commenter;
++            }
++        }
++        MT::Auth->new_login( $app, $commenter );
++        if ( $app->_check_commenter_author( $commenter, $blog_id ) ) {
++            $app->make_commenter_session($commenter);
++            return _redirect_to_target( $app );
++        }
++        $error   = $app->translate("Permission denied.");
++        $message = $app->translate(
++            "Login failed: permission denied for user '[_1]'", $username );
++    }
++    elsif ( MT::Auth::INVALID_PASSWORD() == $result ) {
++        $message = $app->translate(
++            "Login failed: password was wrong for user '[_1]'", $username );
++    }
++    elsif ( MT::Auth::INACTIVE() == $result ) {
++        $message
++            = $app->translate( "Failed login attempt by disabled user '[_1]'",
++            $username );
++    }
++    else {
++        $message
++            = $app->translate( "Failed login attempt by unknown user '[_1]'",
++            $username );
++    }
++    $app->log(
++        {   message  => $message,
++            level    => MT::Log::WARNING(),
++            category => 'login',
++        }
++    );
++    $ctx->{app} ||= $app;
++    MT::Auth->invalidate_credentials($ctx);
++    return _redirect_to_target( $app );
++}
++
++sub cas_logout {
++    my $app = shift;
++    my $q   = $app->param;
++
++    my $return_to = $q->param('return_to') || $q->param('return_url');
++    if ( $return_to ) {
++        $return_to = remove_html($return_to);
++        $return_to =~ s/#.+//;
++        return $app->errtrans('Invalid request.')
++          unless is_url( $return_to );
++    }
++
++    # use MT::Log;
++    # my $log = MT::Log->new;
++    # $log->message("App::Comments::cas_logout invoked");
++    # $log->save;
++
++    my $service_url = _service_url( $app );
++    my $logout_url = MT_CAS::Util->get_server_logout_url(
++        $app->config->AuthLoginURL,
++        $return_to
++    );
++
++    # $app->SUPER::logout();
++    # return $app->redirect($return_to . '#_logout');
++    return $app->redirect($logout_url);
++}
++
++sub _service_url {
++    my ( $app ) = @_;
++    my $q = $app->param;
++    return $app->base . $app->app_uri(
++        mode => 'cas_do_login',
++        args => {
++            key => 'CAS',
++            blog_id => $q->param('blog_id'),
++            external_auth => 1,
++            static => $q->param('static') || $q->param('return_url'),
++            $q->param('entry_id') ? ( entry_id => $q->param('entry_id') ) : ()
++        }
++    );
++}
++
++sub _redirect_to_target {
++    my ( $app ) = @_;
++    my $q = $app->param;
++
++    require MT::App::Comments;
++    # die $q->param('static') ."||". $q->param('return_url');
++    return MT::App::Comments::redirect_to_target( $app );
++}
++
++1;
++__END__
+diff -Nur MT-5.2.3/plugins/MT_CAS/lib/MT_CAS/Tags.pm mt_modified/plugins/MT_CAS/lib/MT_CAS/Tags.pm
+--- MT-5.2.3/plugins/MT_CAS/lib/MT_CAS/Tags.pm	1969-12-31 18:00:00.000000000 -0600
++++ mt_modified/plugins/MT_CAS/lib/MT_CAS/Tags.pm	2013-05-29 15:30:53.975056007 -0500
+@@ -0,0 +1,63 @@
++############################################################################
++# Copyright © 2008-2010 Six Apart Ltd.
++# This program is free software: you can redistribute it and/or modify it
++# under the terms of version 2 of the GNU General Public License as published
++# by the Free Software Foundation, or (at your option) any later version.
++# This program is distributed in the hope that it will be useful, but WITHOUT
++# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++# FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License
++# version 2 for more details. You should have received a copy of the GNU
++# General Public License version 2 along with this program. If not, see
++# <http://www.gnu.org/licenses/>.
++package MT_CAS::Tags;
++
++use strict;
++use warnings;
++
++sub _hdlr_sign_in_link {
++    my ($ctx, $args) = @_;
++    my $cfg = $ctx->{config};
++    my $blog = $ctx->stash('blog');
++    my $path = $ctx->_hdlr_cgi_path();
++    $path .= '/' unless $path =~ m!/$!;
++
++    my $comment_script = $cfg->CommentScript;
++    my $static_arg = $args->{static} ? "&static=" . $args->{static} : '';
++    my $e = $ctx->stash('entry');
++
++    my $community_script = $cfg->CommunityScript;
++     return "$path$community_script?__mode=cas_login$static_arg" .
++         ($blog ? '&blog_id=' . $blog->id : '') .
++         ($e ? '&entry_id=' . $e->id : '');
++
++    return "$path$comment_script?__mode=cas_login$static_arg" .
++        ($blog ? '&blog_id=' . $blog->id : '') .
++        ($e ? '&entry_id=' . $e->id : '');
++}
++
++sub _hdlr_sign_out_link {
++    my ($ctx, $args) = @_;
++    my $cfg = $ctx->{config};
++    my $path = $ctx->_hdlr_cgi_path();
++    $path .= '/' unless $path =~ m!/$!;
++    my $comment_script = $cfg->CommentScript;
++    my $static_arg;
++    if ($args->{no_static}) {
++        $static_arg = q();
++    } else {
++        my $url = $args->{static};
++        if ($url && ($url ne '1')) {
++            $static_arg = "&static=" . MT::Util::encode_url($url);
++        } elsif ($url) {
++            $static_arg = "&static=1";
++        } else {
++            $static_arg = "&static=0";
++        }
++    }
++    my $e = $ctx->stash('entry');
++    return "$path$comment_script?__mode=handle_sign_in$static_arg&logout=1" .
++        ($e ? "&amp;entry_id=" . $e->id : '');
++}
++
++1;
++__END__
+diff -Nur MT-5.2.3/plugins/MT_CAS/lib/MT_CAS/Util.pm mt_modified/plugins/MT_CAS/lib/MT_CAS/Util.pm
+--- MT-5.2.3/plugins/MT_CAS/lib/MT_CAS/Util.pm	1969-12-31 18:00:00.000000000 -0600
++++ mt_modified/plugins/MT_CAS/lib/MT_CAS/Util.pm	2013-05-29 15:30:53.963056008 -0500
+@@ -0,0 +1,76 @@
++############################################################################
++# Copyright © 2008-2010 Six Apart Ltd.
++# This program is free software: you can redistribute it and/or modify it
++# under the terms of version 2 of the GNU General Public License as published
++# by the Free Software Foundation, or (at your option) any later version.
++# This program is distributed in the hope that it will be useful, but WITHOUT
++# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++# FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License
++# version 2 for more details. You should have received a copy of the GNU
++# General Public License version 2 along with this program. If not, see
++# <http://www.gnu.org/licenses/>.
++package MT_CAS::Util;
++
++use strict;
++use warnings;
++use base qw( MT::ErrorHandler );
++use MT::Util qw( encode_url encode_html );
++
++sub get_server_login_url {
++    my $class = shift;
++    my ( $cas_url, $service_url ) = @_;
++    return $cas_url . '/login' . '?service=' . encode_url( $service_url );
++}
++
++sub get_server_logout_url {
++    my $class = shift;
++    my ( $cas_url, $service_url ) = @_;
++    return $cas_url . '/logout' . '?service=' . encode_url( $service_url );
++    # Swap above line with below based on your specific CAS params
++    # return $cas_url . '/logout' . '?url=' . encode_url( $service_url );
++}
++
++sub validate_st {
++    my $class = shift;
++    my ( $cas_url, $service_url, $service_ticket ) = @_;
++    my $plugin = MT->component('mt_cas');
++    my $validate_url = $cas_url
++        . '/serviceValidate'
++        . '?service=' . encode_url( $service_url )
++        . '&ticket=' . $service_ticket;
++
++    my $ua = MT->new_ua;
++    my $resp = $ua->get($validate_url);
++    die $plugin->translate(
++      'HTTP(S) request to the validation service failed: [_1]',
++      $resp->status_line )
++        unless $resp->is_success();
++
++    require XML::Simple;
++    my $xs = XML::Simple->new();
++    my $xml = $xs->XMLin( $resp->content, ForceArray => 1 );
++
++    # response keys $resp->{_protocol}. " :: ".$resp->{_content} ." :: ".$resp->{_headers} ." :: ".$resp->{_msg};
++    if ( defined $xml->{'cas:authenticationFailure'} ) {
++        return $class->error( $plugin->translate(
++            "Failed to validate Service Ticket [_1]: [_2]",
++            encode_html( $service_ticket ),
++            encode_html( $xml->{'cas:authenticationFailure'}[0] )
++        ) );
++    }
++
++    if ( my $user =
++      $xml->{'cas:authenticationSuccess'}[0]{'cas:user'}[0] )
++    {
++        return $user;
++    }
++
++    return $class->error( $plugin->translate(
++        "Failed to validate Service Ticket [_1]: [_2]",
++        encode_html( $service_ticket ),
++        'Unknown error'
++    ) );
++}
++
++1;
++__END__
+diff -Nur MT-5.2.3/plugins/MT_CAS/t/01-util.t mt_modified/plugins/MT_CAS/t/01-util.t
+--- MT-5.2.3/plugins/MT_CAS/t/01-util.t	1969-12-31 18:00:00.000000000 -0600
++++ mt_modified/plugins/MT_CAS/t/01-util.t	2013-05-29 15:30:53.931056010 -0500
+@@ -0,0 +1,39 @@
++#!/usr/bin/perl
++############################################################################
++# Copyright © 2008-2010 Six Apart Ltd.
++# This program is free software: you can redistribute it and/or modify it
++# under the terms of version 2 of the GNU General Public License as published
++# by the Free Software Foundation, or (at your option) any later version.
++# This program is distributed in the hope that it will be useful, but WITHOUT
++# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++# FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License
++# version 2 for more details. You should have received a copy of the GNU
++# General Public License version 2 along with this program. If not, see
++# <http://www.gnu.org/licenses/>.
++use strict;
++use warnings;
++use lib 'lib';
++use lib 'extlib';
++use lib 'plugins/MT_CAS/lib';
++use Test::More tests => 3;
++use_ok 'MT_CAS::Util';
++
++use MT::Util qw( encode_url );
++my $auth_login_url = 'https://localhost:8443/cas';
++my $service_url = 'http://example.com/?__mode=view&_type=entry&blog_id=1';
++
++my $login_url = MT_CAS::Util->get_server_login_url(
++    $auth_login_url,
++    $service_url,
++);
++
++is($login_url, "$auth_login_url/login?service=" . encode_url($service_url), 'get_server_login_url');
++
++my $logout_url = MT_CAS::Util->get_server_logout_url(
++    $auth_login_url,
++    $service_url,
++);
++
++is($logout_url, "$auth_login_url/logout?url=" . encode_url($service_url), 'get_server_logout_url');
++
++1;
